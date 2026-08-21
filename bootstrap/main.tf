@@ -77,9 +77,7 @@ resource "aws_s3_bucket_public_access_block" "terraform_state" {
 ############################################
 
 data "aws_iam_policy_document" "github_plan_assume_role" {
-
   statement {
-
     effect = "Allow"
 
     actions = [
@@ -108,7 +106,7 @@ data "aws_iam_policy_document" "github_plan_assume_role" {
       variable = "token.actions.githubusercontent.com:sub"
 
       values = [
-        "repo:soumyarepo/terraform_pipeline:pull_request"
+        "repo:soumyarepo@36677493/terraform_pipeline@1341957863:pull_request"
       ]
     }
   }
