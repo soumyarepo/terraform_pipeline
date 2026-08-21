@@ -2,11 +2,13 @@ name: Terraform Apply
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - "**/*.tf"
       - "**/*.tfvars"
       - "scripts/**"
+      - ".github/workflows/terraform-apply.yml"
 
 permissions:
   contents: read
@@ -23,76 +25,439 @@ env:
 
 jobs:
   apply:
+    name: Terraform Apply
     runs-on: ubuntu-latest
+
     environment:
       name: production
 
     steps:
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
       - name: Checkout approved and merged code
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # Debug GitHub context
+      # ------------------------------------------------------------
+      - name: Debug GitHub context
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "GitHub Context"
+          echo "========================================"
+          echo "Repository       : $GITHUB_REPOSITORY"
+          echo "Workflow         : $GITHUB_WORKFLOW"
+          echo "Event Name       : $GITHUB_EVENT_NAME"
+          echo "Ref              : $GITHUB_REF"
+          echo "SHA              : $GITHUB_SHA"
+          echo "Actor            : $GITHUB_ACTOR"
+          echo "Workspace        : $GITHUB_WORKSPACE"
+          echo "AWS Region       : $AWS_REGION"
+          echo "========================================"
+
+      # ------------------------------------------------------------
+      # Show repository files
+      # ------------------------------------------------------------
+      - name: Debug repository files
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Current Directory"
+          echo "========================================"
+          pwd
+
+          echo ""
+          echo "========================================"
+          echo "Repository Files"
+          echo "========================================"
+          find . -maxdepth 3 -type f | sort
+
+      # ------------------------------------------------------------
+      # Verify Terraform configuration exists
+      # ------------------------------------------------------------
+      - name: Verify Terraform configuration files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Terraform Files"
+          echo "========================================"
+
+          find . \
+            -type f \
+            -name "*.tf" \
+            -not -path "*/.terraform/*" \
+            -print
+
+          if ! find . \
+            -type f \
+            -name "*.tf" \
+            -not -path "*/.terraform/*" \
+            | grep -q .; then
+
+            echo "::error::No Terraform configuration files (*.tf) were found."
+            exit 1
+          fi
+
+          echo "Terraform configuration files found."
+
+      # ------------------------------------------------------------
+      # Terraform setup
+      # ------------------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ vars.TERRAFORM_VERSION || '1.12.2' }}
 
+      - name: Verify Terraform installation
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Terraform Version"
+          echo "========================================"
+          terraform version
+
+      # ------------------------------------------------------------
+      # Debug OIDC token claims
+      # ------------------------------------------------------------
+      - name: Debug GitHub OIDC Claims
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+
+            const payload = JSON.parse(
+              Buffer.from(
+                token.split('.')[1],
+                'base64'
+              ).toString()
+            );
+
+            console.log("========================================");
+            console.log("GitHub OIDC Claims");
+            console.log("========================================");
+            console.log("Audience     :", payload.aud);
+            console.log("Subject      :", payload.sub);
+            console.log("Repository   :", payload.repository);
+            console.log("Ref          :", payload.ref);
+            console.log("Ref Type     :", payload.ref_type);
+            console.log("Event Name   :", payload.event_name);
+            console.log("Actor        :", payload.actor);
+            console.log("Environment  :", payload.environment);
+            console.log("Workflow     :", payload.workflow);
+            console.log("========================================");
+
+      # ------------------------------------------------------------
+      # Verify required GitHub variables
+      # ------------------------------------------------------------
+      - name: Verify required GitHub variables
+        shell: bash
+        env:
+          APPLY_ROLE_ARN: ${{ vars.TERRAFORM_APPLY_ROLE_ARN }}
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          echo "========================================"
+          echo "GitHub Actions Variables"
+          echo "========================================"
+
+          if [ -z "$APPLY_ROLE_ARN" ]; then
+            echo "::error::TERRAFORM_APPLY_ROLE_ARN is not configured."
+            exit 1
+          fi
+
+          if [ -z "$STATE_BUCKET" ]; then
+            echo "::error::TF_STATE_BUCKET is not configured."
+            exit 1
+          fi
+
+          echo "TERRAFORM_APPLY_ROLE_ARN : $APPLY_ROLE_ARN"
+          echo "TF_STATE_BUCKET          : $STATE_BUCKET"
+          echo "AWS_REGION               : $AWS_REGION"
+          echo "========================================"
+
+      # ------------------------------------------------------------
+      # AWS OIDC authentication
+      # ------------------------------------------------------------
       - name: Configure AWS credentials with GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ vars.TERRAFORM_APPLY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          role-session-name: terraform-apply-${{ github.run_id }}
 
+      # ------------------------------------------------------------
+      # Verify AWS identity
+      # ------------------------------------------------------------
       - name: Verify AWS identity
-        run: aws sts get-caller-identity
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "AWS Caller Identity"
+          echo "========================================"
 
+          aws sts get-caller-identity
+
+          echo ""
+          echo "AWS Region:"
+          aws configure get region || true
+
+      # ------------------------------------------------------------
+      # Terraform Init
+      # ------------------------------------------------------------
       - name: Terraform Init
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Terraform Init"
+          echo "========================================"
+          echo "Backend bucket : ${{ vars.TF_STATE_BUCKET }}"
+          echo "Backend key    : prod/terraform.tfstate"
+          echo "AWS region     : ${{ env.AWS_REGION }}"
+          echo "========================================"
+
           terraform init \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="key=prod/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="encrypt=true" \
-            -backend-config="use_lockfile=true" 2>&1 | tee terraform-init.log
+            -backend-config="use_lockfile=true" \
+            2>&1 | tee terraform-init.log
 
+      # ------------------------------------------------------------
+      # Terraform Format
+      # ------------------------------------------------------------
       - name: Terraform Format
-        run: terraform fmt -check -recursive
-
-      - name: Terraform Validate
-        run: terraform validate -no-color
-
-      - name: Create final production plan
+        shell: bash
         run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Terraform Format Check"
+          echo "========================================"
+
+          terraform fmt \
+            -check \
+            -recursive \
+            -diff \
+            2>&1 | tee terraform-fmt.log
+
+      # ------------------------------------------------------------
+      # Terraform Validate
+      # ------------------------------------------------------------
+      - name: Terraform Validate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Terraform Validate"
+          echo "========================================"
+
+          terraform validate \
+            -no-color \
+            2>&1 | tee terraform-validate.log
+
+      # ------------------------------------------------------------
+      # Verify production tfvars
+      # ------------------------------------------------------------
+      - name: Verify production tfvars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TFVARS_FILE="environments/prod/terraform.tfvars"
+
+          echo "========================================"
+          echo "Production Variables File"
+          echo "========================================"
+          echo "Expected: $TFVARS_FILE"
+
+          if [ ! -f "$TFVARS_FILE" ]; then
+            echo "::error::Terraform tfvars file not found: $TFVARS_FILE"
+
+            echo ""
+            echo "Available tfvars files:"
+            find . \
+              -type f \
+              -name "*.tfvars" \
+              -not -path "*/.terraform/*" \
+              -print
+
+            exit 1
+          fi
+
+          echo "Found: $TFVARS_FILE"
+
+      # ------------------------------------------------------------
+      # Create final production plan
+      # ------------------------------------------------------------
+      - name: Create final production plan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Terraform Production Plan"
+          echo "========================================"
+          echo "Variable file : environments/prod/terraform.tfvars"
+          echo "Output file   : tfplan"
+          echo "========================================"
+
           terraform plan \
-            -var-file=environments/prod/terraform.tfvars \
-            -out=tfplan -no-color
-          terraform show -json tfplan > tfplan.json
+            -var-file="environments/prod/terraform.tfvars" \
+            -out="tfplan" \
+            -no-color \
+            2>&1 | tee terraform-plan.log
 
+      # ------------------------------------------------------------
+      # Verify generated plan
+      # ------------------------------------------------------------
+      - name: Verify Terraform plan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "tfplan" ]; then
+            echo "::error::Terraform plan file was not created."
+            exit 1
+          fi
+
+          echo "Terraform plan generated successfully:"
+          ls -lh tfplan
+
+      # ------------------------------------------------------------
+      # Convert plan to JSON BEFORE apply
+      # ------------------------------------------------------------
+      - name: Convert plan to JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Convert Terraform Plan to JSON"
+          echo "========================================"
+
+          terraform show \
+            -json tfplan \
+            > tfplan.json
+
+          ls -lh tfplan.json
+
+      # ------------------------------------------------------------
+      # Terraform Apply
+      # ------------------------------------------------------------
       - name: Apply exact generated plan
-        run: terraform apply -auto-approve tfplan
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          echo "========================================"
+          echo "Terraform Apply"
+          echo "========================================"
+          echo "Applying exact tfplan generated above."
+          echo "========================================"
+
+          terraform apply \
+            -auto-approve \
+            tfplan \
+            2>&1 | tee terraform-apply.log
+
+      # ------------------------------------------------------------
+      # Capture outputs
+      # ------------------------------------------------------------
       - name: Capture Terraform outputs
         if: success()
-        run: terraform output -json > terraform-outputs.json
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          echo "========================================"
+          echo "Terraform Outputs"
+          echo "========================================"
+
+          terraform output -json > terraform-outputs.json
+
+          if [ -s "terraform-outputs.json" ]; then
+            echo "Terraform outputs captured successfully."
+            ls -lh terraform-outputs.json
+          else
+            echo "Terraform produced no outputs."
+          fi
+
+      # ------------------------------------------------------------
+      # Verify reporting scripts
+      # ------------------------------------------------------------
+      - name: Verify deployment report scripts
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Deployment Report Scripts"
+          echo "========================================"
+
+          if [ ! -f "scripts/deployment-report.py" ]; then
+            echo "::error::scripts/deployment-report.py was not found."
+            exit 1
+          fi
+
+          if [ ! -f "scripts/send-email.py" ]; then
+            echo "::error::scripts/send-email.py was not found."
+            exit 1
+          fi
+
+          python --version
+
+          echo "Required scripts found."
+
+      # ------------------------------------------------------------
+      # Generate deployment reports
+      # ------------------------------------------------------------
       - name: Generate deployment reports
         if: success()
+        shell: bash
         env:
           DEPLOY_ENV: production
           GIT_COMMIT: ${{ github.sha }}
           PIPELINE_RUN: ${{ github.run_id }}
           AWS_REGION: ${{ env.AWS_REGION }}
         run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Generate Deployment Report"
+          echo "========================================"
+
           python scripts/deployment-report.py \
-            tfplan.json terraform-outputs.json \
+            tfplan.json \
+            terraform-outputs.json \
             --markdown deployment-report.md \
             --html deployment-report.html
 
+          echo ""
+          echo "Generated files:"
+          ls -lh deployment-report.md deployment-report.html
+
+      # ------------------------------------------------------------
+      # Job summary
+      # ------------------------------------------------------------
       - name: Add deployment report to job summary
         if: success()
-        run: cat deployment-report.md >> "$GITHUB_STEP_SUMMARY"
+        shell: bash
+        run: |
+          echo "## Terraform Production Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat deployment-report.md >> "$GITHUB_STEP_SUMMARY"
 
+      # ------------------------------------------------------------
+      # Email report
+      # ------------------------------------------------------------
       - name: Send deployment email
         if: success()
         env:
@@ -102,14 +467,29 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python scripts/send-email.py deployment-report.html "Terraform AWS Deployment - SUCCESS - Production"
+        run: |
+          echo "========================================"
+          echo "Sending Deployment Email"
+          echo "========================================"
 
-      - name: Upload deployment report
+          python scripts/send-email.py \
+            deployment-report.html \
+            "Terraform AWS Deployment - SUCCESS - Production"
+
+      # ------------------------------------------------------------
+      # Upload logs and deployment report
+      # ------------------------------------------------------------
+      - name: Upload deployment artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: terraform-deployment-report-${{ github.run_id }}
           path: |
+            terraform-init.log
+            terraform-fmt.log
+            terraform-validate.log
+            terraform-plan.log
+            terraform-apply.log
             tfplan.json
             terraform-outputs.json
             deployment-report.md
