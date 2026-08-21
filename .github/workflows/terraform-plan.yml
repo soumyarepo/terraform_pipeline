@@ -2,7 +2,8 @@ name: Terraform Plan
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
     paths:
       - "**/*.tf"
       - "**/*.tfvars"
@@ -21,92 +22,430 @@ env:
 
 jobs:
   plan:
+    name: Terraform Plan
     runs-on: ubuntu-latest
+
     steps:
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
       - name: Checkout Terraform source code
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # Debug repository / branch information
+      # ------------------------------------------------------------
+      - name: Debug GitHub context
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "GitHub Context"
+          echo "========================================"
+          echo "Repository       : $GITHUB_REPOSITORY"
+          echo "Workflow         : $GITHUB_WORKFLOW"
+          echo "Event Name       : $GITHUB_EVENT_NAME"
+          echo "Ref              : $GITHUB_REF"
+          echo "SHA              : $GITHUB_SHA"
+          echo "Actor            : $GITHUB_ACTOR"
+          echo "Workspace        : $GITHUB_WORKSPACE"
+          echo "AWS Region       : $AWS_REGION"
+          echo "========================================"
+
+      # ------------------------------------------------------------
+      # Show repository structure
+      # ------------------------------------------------------------
+      - name: Debug repository files
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Current Directory"
+          echo "========================================"
+          pwd
+
+          echo ""
+          echo "========================================"
+          echo "Repository Files"
+          echo "========================================"
+          find . -maxdepth 3 -type f | sort
+
+      # ------------------------------------------------------------
+      # Verify Terraform files exist
+      # ------------------------------------------------------------
       - name: Verify Terraform configuration files
         shell: bash
         run: |
           set -euo pipefail
-          if ! find . -type f -name "*.tf" -not -path "*/.terraform/*" | grep -q .; then
+
+          echo "========================================"
+          echo "Searching for Terraform files"
+          echo "========================================"
+
+          find . \
+            -type f \
+            -name "*.tf" \
+            -not -path "*/.terraform/*" \
+            -print
+
+          if ! find . \
+            -type f \
+            -name "*.tf" \
+            -not -path "*/.terraform/*" \
+            | grep -q .; then
+
             echo "::error::No Terraform configuration files (*.tf) were found."
             exit 1
           fi
-          echo "Terraform configuration files found."
 
+          echo "Terraform configuration files found successfully."
+
+      # ------------------------------------------------------------
+      # Terraform setup
+      # ------------------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ vars.TERRAFORM_VERSION || '1.12.2' }}
 
+      - name: Verify Terraform installation
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Terraform Version"
+          echo "========================================"
+          terraform version
+
+      # ------------------------------------------------------------
+      # Debug GitHub OIDC token claims
+      # ------------------------------------------------------------
+      - name: Debug GitHub OIDC Claims
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+
+            const payload = JSON.parse(
+              Buffer.from(
+                token.split('.')[1],
+                'base64'
+              ).toString()
+            );
+
+            console.log("========================================");
+            console.log("GitHub OIDC Claims");
+            console.log("========================================");
+            console.log("Audience     :", payload.aud);
+            console.log("Subject      :", payload.sub);
+            console.log("Repository   :", payload.repository);
+            console.log("Ref          :", payload.ref);
+            console.log("Ref Type     :", payload.ref_type);
+            console.log("Event Name   :", payload.event_name);
+            console.log("Actor        :", payload.actor);
+            console.log("Environment  :", payload.environment);
+            console.log("Workflow     :", payload.workflow);
+            console.log("========================================");
+
+      # ------------------------------------------------------------
+      # Debug GitHub variables
+      # Do NOT print sensitive credentials.
+      # ------------------------------------------------------------
+      - name: Verify required GitHub variables
+        shell: bash
+        env:
+          PLAN_ROLE_ARN: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          echo "========================================"
+          echo "GitHub Actions Variables"
+          echo "========================================"
+
+          if [ -z "$PLAN_ROLE_ARN" ]; then
+            echo "::error::TERRAFORM_PLAN_ROLE_ARN is not configured."
+            exit 1
+          fi
+
+          if [ -z "$STATE_BUCKET" ]; then
+            echo "::error::TF_STATE_BUCKET is not configured."
+            exit 1
+          fi
+
+          echo "TERRAFORM_PLAN_ROLE_ARN : $PLAN_ROLE_ARN"
+          echo "TF_STATE_BUCKET         : $STATE_BUCKET"
+          echo "AWS_REGION              : $AWS_REGION"
+          echo "========================================"
+
+      # ------------------------------------------------------------
+      # AWS authentication through GitHub OIDC
+      # ------------------------------------------------------------
       - name: Configure AWS credentials with GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          role-session-name: terraform-plan-${{ github.run_id }}
 
+      # ------------------------------------------------------------
+      # Verify assumed AWS identity
+      # ------------------------------------------------------------
       - name: Verify AWS identity
-        run: aws sts get-caller-identity
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "AWS Caller Identity"
+          echo "========================================"
 
+          aws sts get-caller-identity
+
+          echo ""
+          echo "AWS Region:"
+          aws configure get region || true
+
+      # ------------------------------------------------------------
+      # Terraform Init
+      # ------------------------------------------------------------
       - name: Terraform Init
         shell: bash
         run: |
-          set -o pipefail
-          terraform init -upgrade \
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Terraform Init"
+          echo "========================================"
+          echo "Backend bucket : ${{ vars.TF_STATE_BUCKET }}"
+          echo "Backend key    : prod/terraform.tfstate"
+          echo "AWS region     : ${{ env.AWS_REGION }}"
+          echo "========================================"
+
+          terraform init \
+            -upgrade \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="key=prod/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="encrypt=true" \
-            -backend-config="use_lockfile=true" 2>&1 | tee terraform-init.log
+            -backend-config="use_lockfile=true" \
+            2>&1 | tee terraform-init.log
 
+      # ------------------------------------------------------------
+      # Terraform format
+      # ------------------------------------------------------------
       - name: Terraform Format
         shell: bash
         run: |
-          set -o pipefail
-          terraform fmt -check -recursive 2>&1 | tee terraform-fmt.log
+          set -euo pipefail
 
+          echo "========================================"
+          echo "Terraform Format Check"
+          echo "========================================"
+
+          terraform fmt \
+            -check \
+            -recursive \
+            -diff \
+            2>&1 | tee terraform-fmt.log
+
+      # ------------------------------------------------------------
+      # Terraform validation
+      # ------------------------------------------------------------
       - name: Terraform Validate
         shell: bash
         run: |
-          set -o pipefail
-          terraform validate -no-color 2>&1 | tee terraform-validate.log
+          set -euo pipefail
 
+          echo "========================================"
+          echo "Terraform Validate"
+          echo "========================================"
+
+          terraform validate \
+            -no-color \
+            2>&1 | tee terraform-validate.log
+
+      # ------------------------------------------------------------
+      # Verify tfvars exists before plan
+      # ------------------------------------------------------------
+      - name: Verify production tfvars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TFVARS_FILE="environments/prod/terraform.tfvars"
+
+          echo "========================================"
+          echo "Checking Terraform Variables File"
+          echo "========================================"
+          echo "Expected file: $TFVARS_FILE"
+
+          if [ ! -f "$TFVARS_FILE" ]; then
+            echo "::error::Terraform tfvars file not found: $TFVARS_FILE"
+
+            echo ""
+            echo "Available .tfvars files:"
+            find . \
+              -type f \
+              -name "*.tfvars" \
+              -not -path "*/.terraform/*" \
+              -print
+
+            exit 1
+          fi
+
+          echo "Found: $TFVARS_FILE"
+
+      # ------------------------------------------------------------
+      # Terraform plan
+      # ------------------------------------------------------------
       - name: Terraform Plan
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Terraform Plan"
+          echo "========================================"
+          echo "Variable file : environments/prod/terraform.tfvars"
+          echo "Plan output   : tfplan"
+          echo "========================================"
+
           terraform plan \
-            -var-file=environments/prod/terraform.tfvars \
-            -out=tfplan -no-color 2>&1 | tee terraform-plan.log
+            -var-file="environments/prod/terraform.tfvars" \
+            -out="tfplan" \
+            -no-color \
+            2>&1 | tee terraform-plan.log
 
+      # ------------------------------------------------------------
+      # Debug generated Terraform plan
+      # ------------------------------------------------------------
+      - name: Verify Terraform plan file
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Terraform Plan File"
+          echo "========================================"
+
+          if [ ! -f "tfplan" ]; then
+            echo "::error::tfplan was not generated."
+            exit 1
+          fi
+
+          ls -lh tfplan
+          echo "Terraform plan created successfully."
+
+      # ------------------------------------------------------------
+      # Convert plan to JSON
+      # ------------------------------------------------------------
       - name: Convert plan to JSON
-        run: terraform show -json tfplan > tfplan.json
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          echo "========================================"
+          echo "Converting Plan to JSON"
+          echo "========================================"
+
+          terraform show \
+            -json tfplan \
+            > tfplan.json
+
+          ls -lh tfplan.json
+
+      # ------------------------------------------------------------
+      # Verify Python
+      # ------------------------------------------------------------
+      - name: Verify Python and summary script
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Python Environment"
+          echo "========================================"
+
+          python --version
+
+          echo ""
+          echo "Checking summary script..."
+
+          if [ ! -f "scripts/terraform-plan-summary.py" ]; then
+            echo "::error::scripts/terraform-plan-summary.py was not found."
+
+            echo ""
+            echo "Scripts directory:"
+            find scripts -maxdepth 2 -type f -print 2>/dev/null || true
+
+            exit 1
+          fi
+
+          echo "Summary script found."
+
+      # ------------------------------------------------------------
+      # Generate Markdown plan summary
+      # ------------------------------------------------------------
       - name: Generate plan table
-        run: python scripts/terraform-plan-summary.py tfplan.json > terraform-plan-summary.md
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          echo "========================================"
+          echo "Generating Terraform Plan Summary"
+          echo "========================================"
+
+          python scripts/terraform-plan-summary.py \
+            tfplan.json \
+            > terraform-plan-summary.md
+
+          echo ""
+          echo "Generated summary:"
+          cat terraform-plan-summary.md
+
+      # ------------------------------------------------------------
+      # GitHub job summary
+      # ------------------------------------------------------------
       - name: Add plan table to job summary
-        run: cat terraform-plan-summary.md >> "$GITHUB_STEP_SUMMARY"
+        shell: bash
+        run: |
+          echo "## Terraform Plan Result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat terraform-plan-summary.md >> "$GITHUB_STEP_SUMMARY"
 
+      # ------------------------------------------------------------
+      # Add plan summary to pull request
+      # ------------------------------------------------------------
       - name: Post plan table to Pull Request
         uses: actions/github-script@v8
         with:
           script: |
             const fs = require("fs");
-            const body = fs.readFileSync("terraform-plan-summary.md", "utf8");
+
+            const body = fs.readFileSync(
+              "terraform-plan-summary.md",
+              "utf8"
+            );
+
+            console.log("Posting Terraform plan summary to PR...");
+            console.log("PR Number:", context.issue.number);
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body
+              body: body
             });
 
-      - name: Upload plan artifacts
+            console.log("Terraform plan summary posted successfully.");
+
+      # ------------------------------------------------------------
+      # Upload debug logs and plan artifacts
+      # ------------------------------------------------------------
+      - name: Upload Terraform plan artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: terraform-plan-pr-${{ github.event.pull_request.number }}
           path: |
+            terraform-init.log
+            terraform-fmt.log
+            terraform-validate.log
+            terraform-plan.log
             tfplan.json
             terraform-plan-summary.md
+          if-no-files-found: warn
