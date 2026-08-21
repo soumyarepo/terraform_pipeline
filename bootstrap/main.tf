@@ -95,7 +95,6 @@ data "aws_iam_policy_document" "github_plan_assume_role" {
     }
 
     condition {
-
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:aud"
 
@@ -105,12 +104,11 @@ data "aws_iam_policy_document" "github_plan_assume_role" {
     }
 
     condition {
-
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
 
       values = [
-        "repo:${var.github_org}/${var.github_repo}:*"
+        "repo:soumyarepo/terraform_pipeline:pull_request"
       ]
     }
   }
@@ -157,7 +155,6 @@ data "aws_iam_policy_document" "github_apply_assume_role" {
     }
 
     condition {
-
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:aud"
 
@@ -167,12 +164,11 @@ data "aws_iam_policy_document" "github_apply_assume_role" {
     }
 
     condition {
-
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
 
       values = [
-        "repo:${var.github_org}/${var.github_repo}:*"
+        "repo:soumyarepo/terraform_pipeline:environment:production"
       ]
     }
   }
