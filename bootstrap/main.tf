@@ -137,7 +137,6 @@ resource "aws_iam_role" "terraform_plan" {
 data "aws_iam_policy_document" "github_apply_assume_role" {
 
   statement {
-
     effect = "Allow"
 
     actions = [
@@ -166,7 +165,7 @@ data "aws_iam_policy_document" "github_apply_assume_role" {
       variable = "token.actions.githubusercontent.com:sub"
 
       values = [
-        "repo:soumyarepo/terraform_pipeline:environment:production"
+        "repo:soumyarepo@36677493/terraform_pipeline@1341957863:environment:production"
       ]
     }
   }
