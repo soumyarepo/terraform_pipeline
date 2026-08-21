@@ -4,11 +4,10 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - '**/*.tf'
-      - '**/*.tfvars'
-      - '.terraform-version'
-      - '.github/workflows/terraform-plan.yml'
-      - 'scripts/**'
+      - "**/*.tf"
+      - "**/*.tfvars"
+      - "scripts/**"
+      - ".github/workflows/terraform-plan.yml"
 
 permissions:
   contents: read
@@ -16,71 +15,87 @@ permissions:
   id-token: write
 
 env:
-  TF_IN_AUTOMATION: true
-  TF_INPUT: false
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
 
 jobs:
   plan:
-    name: Validate and Plan
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: environments/dev
-
     steps:
-      - name: Checkout
+      - name: Checkout Terraform source code
         uses: actions/checkout@v4
+
+      - name: Verify Terraform configuration files
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! find . -type f -name "*.tf" -not -path "*/.terraform/*" | grep -q .; then
+            echo "::error::No Terraform configuration files (*.tf) were found."
+            exit 1
+          fi
+          echo "Terraform configuration files found."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ vars.TERRAFORM_VERSION || '1.12.2' }}
 
-      - name: Verify Terraform files
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! find ../.. -type f -name '*.tf' -not -path '*/.terraform/*' | grep -q .; then
-            echo "::error::No Terraform configuration files (*.tf) found."
-            exit 1
-          fi
-          echo "Terraform configuration files found."
-
-      - name: Configure AWS credentials
-        if: ${{ vars.TERRAFORM_PLAN_ROLE_ARN != '' }}
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Terraform Init
-        run: terraform init -upgrade
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
 
-      - name: Terraform Format Check
-        working-directory: .
+      - name: Terraform Init
+        shell: bash
         run: |
           set -o pipefail
-          terraform fmt -check -recursive
+          terraform init -upgrade \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=prod/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true" 2>&1 | tee terraform-init.log
+
+      - name: Terraform Format
+        shell: bash
+        run: |
+          set -o pipefail
+          terraform fmt -check -recursive 2>&1 | tee terraform-fmt.log
 
       - name: Terraform Validate
-        run: terraform validate
+        shell: bash
+        run: |
+          set -o pipefail
+          terraform validate -no-color 2>&1 | tee terraform-validate.log
 
       - name: Terraform Plan
-        run: terraform plan -out=tfplan -no-color
+        shell: bash
+        run: |
+          set -o pipefail
+          terraform plan \
+            -var-file=environments/prod/terraform.tfvars \
+            -out=tfplan -no-color 2>&1 | tee terraform-plan.log
 
       - name: Convert plan to JSON
         run: terraform show -json tfplan > tfplan.json
 
-      - name: Generate plan summary
-        run: python ../../scripts/terraform-plan-summary.py tfplan.json > plan-summary.md
+      - name: Generate plan table
+        run: python scripts/terraform-plan-summary.py tfplan.json > terraform-plan-summary.md
 
-      - name: Publish plan summary to PR
-        uses: actions/github-script@v7
+      - name: Add plan table to job summary
+        run: cat terraform-plan-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post plan table to Pull Request
+        uses: actions/github-script@v8
         with:
           script: |
-            const fs = require('fs');
-            const body = fs.readFileSync('environments/dev/plan-summary.md', 'utf8');
+            const fs = require("fs");
+            const body = fs.readFileSync("terraform-plan-summary.md", "utf8");
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -91,9 +106,7 @@ jobs:
       - name: Upload plan artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-plan-${{ github.event.pull_request.number }}
+          name: terraform-plan-pr-${{ github.event.pull_request.number }}
           path: |
-            environments/dev/tfplan
-            environments/dev/tfplan.json
-            environments/dev/plan-summary.md
-            environments/dev/.terraform.lock.hcl
+            tfplan.json
+            terraform-plan-summary.md

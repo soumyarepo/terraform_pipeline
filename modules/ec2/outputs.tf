@@ -1,1 +1,3 @@
-output "instance_id" { value = null }
+output "instance_id" {
+  value = null
+}

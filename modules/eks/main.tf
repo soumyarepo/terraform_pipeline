@@ -1,1 +1,1 @@
-# Placeholder module for future EKS workloads.
+# EKS module placeholder. Not enabled by the root module.

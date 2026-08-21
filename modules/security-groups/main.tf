@@ -1,15 +1,7 @@
-resource "aws_security_group" "main" {
-  name        = "${var.name}-default"
-  description = "Managed by Terraform"
+resource "aws_security_group" "this" {
+  name        = var.name
+  description = "Application security group managed by Terraform"
   vpc_id      = var.vpc_id
-
-  ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   egress {
     from_port   = 0
@@ -18,5 +10,7 @@ resource "aws_security_group" "main" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = var.tags
+  tags = {
+    Name = var.name
+  }
 }

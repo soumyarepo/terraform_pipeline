@@ -1,49 +1,38 @@
-# Terraform AWS Infrastructure CI/CD
+# Terraform Infrastructure — Final CI/CD Project
 
-Production-oriented starter repository for Terraform on AWS with GitHub Actions.
+## Pipeline sequence
 
-## Workflow
+Feature branch → Pull Request → Terraform Plan → plan table in PR → reviewer approval → merge to `main` → production approval gate → Terraform Apply → deployment table → HTML email.
 
-1. Pull request triggers `terraform-plan.yml`.
-2. Checkout and Terraform file validation.
-3. `terraform init -upgrade`.
-4. `terraform fmt -check -recursive`.
-5. `terraform validate`.
-6. `terraform plan` and JSON conversion.
-7. Plan summary is posted to the PR.
-8. Merge to `main` triggers `terraform-apply.yml`.
-9. Production GitHub Environment approval can gate the apply.
-10. Apply generates a deployment report artifact.
+## GitHub repository variables
 
-## Before first deployment
+Configure these under **Settings → Secrets and variables → Actions → Variables**:
 
-This repository is intentionally a safe starter and does not contain organization-specific AWS credentials, state buckets, or IAM role ARNs.
+- `AWS_REGION` (example: `ap-south-1`)
+- `TERRAFORM_VERSION` (example: `1.12.2`)
+- `TERRAFORM_PLAN_ROLE_ARN`
+- `TERRAFORM_APPLY_ROLE_ARN`
+- `TF_STATE_BUCKET`
 
-Configure:
+## GitHub Actions secrets for email
 
-- AWS IAM OIDC trust for GitHub Actions.
-- `TERRAFORM_PLAN_ROLE_ARN` repository/environment variable.
-- `TERRAFORM_APPLY_ROLE_ARN` repository/environment variable.
-- `AWS_REGION`.
-- A protected `production` GitHub Environment with required reviewers.
-- An S3 remote backend in each environment.
-- Commit generated `.terraform.lock.hcl` files after running Terraform init for your target platform.
+- `SMTP_HOST`
+- `SMTP_PORT` (`587` for STARTTLS or `465` for SSL)
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
+- `EMAIL_FROM`
+- `EMAIL_TO`
+
+## AWS prerequisites
+
+1. Configure GitHub Actions OIDC in AWS IAM.
+2. Create a plan IAM role and an apply IAM role with appropriate least-privilege policies.
+3. Create the S3 state bucket and enable versioning/encryption.
+4. Configure the GitHub `production` Environment with required reviewers.
+5. Protect `main` so changes are merged through approved Pull Requests.
 
 ## Important
 
-Do not commit AWS access keys or Terraform state files.
+The PR and Apply workflows both plan the **production tfvars** so the reviewer sees the same target environment that is later applied. The apply workflow creates a fresh plan from the approved merged commit and immediately applies that exact saved plan.
 
-The sample security group intentionally allows HTTPS from the internet; review it for your actual application requirements before production use.
-
-The EC2, EKS and RDS modules are placeholders and are not deployed by default.
-
-## Local validation
-
-From an environment directory:
-
-```bash
-terraform init
-terraform fmt -check -recursive
-terraform validate
-terraform plan
-```
+`main.tf` is included because a runnable root Terraform module must instantiate the VPC and security-group modules. EC2, EKS and RDS are provided as module placeholders and are not enabled by default.

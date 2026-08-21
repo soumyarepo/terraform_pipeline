@@ -1,1 +1,3 @@
-output "cluster_name" { value = null }
+output "cluster_name" {
+  value = null
+}
