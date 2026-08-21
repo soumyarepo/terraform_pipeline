@@ -1,0 +1,74 @@
+name: Terraform Apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.tf'
+      - '**/*.tfvars'
+      - '.terraform-version'
+      - '.github/workflows/terraform-apply.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-production
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+
+jobs:
+  apply:
+    name: Apply Production
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    defaults:
+      run:
+        working-directory: environments/prod
+
+    steps:
+      - name: Checkout approved commit
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TERRAFORM_VERSION || '1.12.2' }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TERRAFORM_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan -no-color
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+      - name: Capture outputs
+        run: terraform output -json > deployment-outputs.json
+
+      - name: Generate deployment report
+        run: python ../../scripts/deployment-report.py deployment-outputs.json > deployment-report.md
+
+      - name: Upload deployment report
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-deployment-report-${{ github.run_id }}
+          path: |
+            environments/prod/deployment-report.md
+            environments/prod/deployment-outputs.json

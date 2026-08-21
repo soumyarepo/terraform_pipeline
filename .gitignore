@@ -1,0 +1,13 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+tfplan
+*.tfplan.json
+deployment-outputs.json
+plan-summary.md
+deployment-report.md
+.terraformrc
+terraform.rc
