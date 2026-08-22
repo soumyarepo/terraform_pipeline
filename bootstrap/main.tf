@@ -30,7 +30,6 @@ resource "aws_s3_bucket" "terraform_state" {
 ############################################
 
 resource "aws_s3_bucket_versioning" "terraform_state" {
-
   bucket = aws_s3_bucket.terraform_state.id
 
   versioning_configuration {
@@ -44,15 +43,12 @@ resource "aws_s3_bucket_versioning" "terraform_state" {
 ############################################
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" {
-
   bucket = aws_s3_bucket.terraform_state.id
 
   rule {
-
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
     }
-
   }
 }
 
@@ -62,7 +58,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" 
 ############################################
 
 resource "aws_s3_bucket_public_access_block" "terraform_state" {
-
   bucket = aws_s3_bucket.terraform_state.id
 
   block_public_acls       = true
@@ -118,7 +113,6 @@ data "aws_iam_policy_document" "github_plan_assume_role" {
 ############################################
 
 resource "aws_iam_role" "terraform_plan" {
-
   name = "terraform-github-plan-role"
 
   assume_role_policy = data.aws_iam_policy_document.github_plan_assume_role.json
@@ -135,7 +129,6 @@ resource "aws_iam_role" "terraform_plan" {
 ############################################
 
 data "aws_iam_policy_document" "github_apply_assume_role" {
-
   statement {
     effect = "Allow"
 
@@ -177,7 +170,6 @@ data "aws_iam_policy_document" "github_apply_assume_role" {
 ############################################
 
 resource "aws_iam_role" "terraform_apply" {
-
   name = "terraform-github-apply-role"
 
   assume_role_policy = data.aws_iam_policy_document.github_apply_assume_role.json
@@ -194,7 +186,6 @@ resource "aws_iam_role" "terraform_apply" {
 ############################################
 
 resource "aws_iam_role_policy_attachment" "plan_readonly" {
-
   role = aws_iam_role.terraform_plan.name
 
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
@@ -202,14 +193,84 @@ resource "aws_iam_role_policy_attachment" "plan_readonly" {
 
 
 ############################################
-# APPLY Permissions
+# APPLY Least Privilege Policy Document
 ############################################
 
-resource "aws_iam_role_policy_attachment" "apply_admin" {
+data "aws_iam_policy_document" "terraform_apply_permissions" {
 
-  role = aws_iam_role.terraform_apply.name
+  ############################################
+  # VPC / Networking Permissions
+  ############################################
 
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+  statement {
+    effect = "Allow"
+
+    actions = [
+      "ec2:CreateVpc",
+      "ec2:DeleteVpc",
+      "ec2:DescribeVpcs",
+      "ec2:ModifyVpcAttribute",
+
+      "ec2:CreateSubnet",
+      "ec2:DeleteSubnet",
+      "ec2:DescribeSubnets",
+      "ec2:ModifySubnetAttribute",
+
+      "ec2:CreateInternetGateway",
+      "ec2:DeleteInternetGateway",
+      "ec2:AttachInternetGateway",
+      "ec2:DetachInternetGateway",
+      "ec2:DescribeInternetGateways",
+
+      "ec2:CreateRouteTable",
+      "ec2:DeleteRouteTable",
+      "ec2:DescribeRouteTables",
+      "ec2:AssociateRouteTable",
+      "ec2:DisassociateRouteTable",
+      "ec2:CreateRoute",
+      "ec2:DeleteRoute",
+      "ec2:ReplaceRoute",
+
+      "ec2:CreateSecurityGroup",
+      "ec2:DeleteSecurityGroup",
+      "ec2:DescribeSecurityGroups",
+      "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:AuthorizeSecurityGroupEgress",
+      "ec2:RevokeSecurityGroupIngress",
+      "ec2:RevokeSecurityGroupEgress",
+
+      "ec2:CreateTags",
+      "ec2:DeleteTags",
+      "ec2:DescribeTags",
+
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeNetworkInterfaces"
+    ]
+
+    resources = ["*"]
+  }
+}
+
+
+############################################
+# Create APPLY Least Privilege IAM Policy
+############################################
+
+resource "aws_iam_policy" "terraform_apply_permissions" {
+  name        = "terraform-github-apply-policy"
+  description = "Least privilege permissions for Terraform GitHub Actions apply"
+
+  policy = data.aws_iam_policy_document.terraform_apply_permissions.json
+}
+
+
+############################################
+# Attach APPLY Least Privilege Policy
+############################################
+
+resource "aws_iam_role_policy_attachment" "terraform_apply_permissions" {
+  role       = aws_iam_role.terraform_apply.name
+  policy_arn = aws_iam_policy.terraform_apply_permissions.arn
 }
 
 
@@ -220,11 +281,11 @@ resource "aws_iam_role_policy_attachment" "apply_admin" {
 data "aws_iam_policy_document" "terraform_state_access" {
 
   statement {
-
     effect = "Allow"
 
     actions = [
-      "s3:ListBucket"
+      "s3:ListBucket",
+      "s3:GetBucketVersioning"
     ]
 
     resources = [
@@ -233,7 +294,6 @@ data "aws_iam_policy_document" "terraform_state_access" {
   }
 
   statement {
-
     effect = "Allow"
 
     actions = [
@@ -249,23 +309,32 @@ data "aws_iam_policy_document" "terraform_state_access" {
 }
 
 
-resource "aws_iam_policy" "terraform_state_access" {
+############################################
+# Create Terraform State Access Policy
+############################################
 
+resource "aws_iam_policy" "terraform_state_access" {
   name = "terraform-state-access"
 
   policy = data.aws_iam_policy_document.terraform_state_access.json
 }
 
 
-resource "aws_iam_role_policy_attachment" "plan_state_access" {
+############################################
+# Attach State Policy to PLAN Role
+############################################
 
+resource "aws_iam_role_policy_attachment" "plan_state_access" {
   role       = aws_iam_role.terraform_plan.name
   policy_arn = aws_iam_policy.terraform_state_access.arn
 }
 
 
-resource "aws_iam_role_policy_attachment" "apply_state_access" {
+############################################
+# Attach State Policy to APPLY Role
+############################################
 
+resource "aws_iam_role_policy_attachment" "apply_state_access" {
   role       = aws_iam_role.terraform_apply.name
   policy_arn = aws_iam_policy.terraform_state_access.arn
 }
