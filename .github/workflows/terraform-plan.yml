@@ -310,6 +310,36 @@ jobs:
             -no-color \
             2>&1 | tee terraform-plan.log
 
+            # ------------------------------------------------------------
+      # Terraform Linting
+      # ------------------------------------------------------------
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v5
+
+      - name: Initialize TFLint
+        run: tflint --init
+
+      - name: Run TFLint
+        run: tflint --recursive
+
+
+      # ------------------------------------------------------------
+      # Terraform Security Scan
+      # ------------------------------------------------------------
+
+      - name: Install Checkov
+        run: |
+          python -m pip install --upgrade pip
+          pip install checkov
+
+      - name: Run Checkov Terraform Security Scan
+        run: |
+          checkov \
+            -d . \
+            --framework terraform \
+            --compact
+
       # ------------------------------------------------------------
       # Debug generated Terraform plan
       # ------------------------------------------------------------
