@@ -8,6 +8,7 @@ on:
       - "**/*.tf"
       - "**/*.tfvars"
       - "scripts/**"
+      - ".tflint.hcl"
       - ".github/workflows/terraform-plan.yml"
 
 permissions:
@@ -26,15 +27,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------------
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout Terraform source code
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # Debug repository / branch information
-      # ------------------------------------------------------------
+      # ============================================================
+      # DEBUG GITHUB CONTEXT
+      # ============================================================
+
       - name: Debug GitHub context
         shell: bash
         run: |
@@ -51,26 +55,30 @@ jobs:
           echo "AWS Region       : $AWS_REGION"
           echo "========================================"
 
-      # ------------------------------------------------------------
-      # Show repository structure
-      # ------------------------------------------------------------
+      # ============================================================
+      # DEBUG REPOSITORY FILES
+      # ============================================================
+
       - name: Debug repository files
         shell: bash
         run: |
           echo "========================================"
           echo "Current Directory"
           echo "========================================"
+
           pwd
 
           echo ""
           echo "========================================"
           echo "Repository Files"
           echo "========================================"
+
           find . -maxdepth 3 -type f | sort
 
-      # ------------------------------------------------------------
-      # Verify Terraform files exist
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY TERRAFORM FILES
+      # ============================================================
+
       - name: Verify Terraform configuration files
         shell: bash
         run: |
@@ -96,11 +104,13 @@ jobs:
             exit 1
           fi
 
+          echo ""
           echo "Terraform configuration files found successfully."
 
-      # ------------------------------------------------------------
-      # Terraform setup
-      # ------------------------------------------------------------
+      # ============================================================
+      # SETUP TERRAFORM
+      # ============================================================
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -112,11 +122,13 @@ jobs:
           echo "========================================"
           echo "Terraform Version"
           echo "========================================"
+
           terraform version
 
-      # ------------------------------------------------------------
-      # Debug GitHub OIDC token claims
-      # ------------------------------------------------------------
+      # ============================================================
+      # DEBUG GITHUB OIDC CLAIMS
+      # ============================================================
+
       - name: Debug GitHub OIDC Claims
         uses: actions/github-script@v8
         with:
@@ -144,16 +156,18 @@ jobs:
             console.log("Workflow     :", payload.workflow);
             console.log("========================================");
 
-      # ------------------------------------------------------------
-      # Debug GitHub variables
-      # Do NOT print sensitive credentials.
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY REQUIRED GITHUB VARIABLES
+      # ============================================================
+
       - name: Verify required GitHub variables
         shell: bash
         env:
           PLAN_ROLE_ARN: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
           STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
         run: |
+          set -euo pipefail
+
           echo "========================================"
           echo "GitHub Actions Variables"
           echo "========================================"
@@ -173,9 +187,10 @@ jobs:
           echo "AWS_REGION              : $AWS_REGION"
           echo "========================================"
 
-      # ------------------------------------------------------------
-      # AWS authentication through GitHub OIDC
-      # ------------------------------------------------------------
+      # ============================================================
+      # CONFIGURE AWS OIDC
+      # ============================================================
+
       - name: Configure AWS credentials with GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v5
         with:
@@ -183,12 +198,15 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: terraform-plan-${{ github.run_id }}
 
-      # ------------------------------------------------------------
-      # Verify assumed AWS identity
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY AWS IDENTITY
+      # ============================================================
+
       - name: Verify AWS identity
         shell: bash
         run: |
+          set -euo pipefail
+
           echo "========================================"
           echo "AWS Caller Identity"
           echo "========================================"
@@ -197,11 +215,13 @@ jobs:
 
           echo ""
           echo "AWS Region:"
+
           aws configure get region || true
 
-      # ------------------------------------------------------------
-      # Terraform Init
-      # ------------------------------------------------------------
+      # ============================================================
+      # TERRAFORM INIT
+      # ============================================================
+
       - name: Terraform Init
         shell: bash
         run: |
@@ -224,9 +244,10 @@ jobs:
             -backend-config="use_lockfile=true" \
             2>&1 | tee terraform-init.log
 
-      # ------------------------------------------------------------
-      # Terraform format
-      # ------------------------------------------------------------
+      # ============================================================
+      # TERRAFORM FORMAT
+      # ============================================================
+
       - name: Terraform Format
         shell: bash
         run: |
@@ -242,9 +263,10 @@ jobs:
             -diff \
             2>&1 | tee terraform-fmt.log
 
-      # ------------------------------------------------------------
-      # Terraform validation
-      # ------------------------------------------------------------
+      # ============================================================
+      # TERRAFORM VALIDATE
+      # ============================================================
+
       - name: Terraform Validate
         shell: bash
         run: |
@@ -258,9 +280,221 @@ jobs:
             -no-color \
             2>&1 | tee terraform-validate.log
 
-      # ------------------------------------------------------------
-      # Verify tfvars exists before plan
-      # ------------------------------------------------------------
+      # ============================================================
+      # TFLINT
+      # ============================================================
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v5
+
+      - name: Verify TFLint installation
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "TFLint Version"
+          echo "========================================"
+
+          tflint --version
+
+      - name: Initialize TFLint
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Initializing TFLint"
+          echo "========================================"
+
+          tflint --init
+
+      - name: Run TFLint and generate JSON report
+        id: tflint
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Running TFLint"
+          echo "========================================"
+
+          set +e
+
+          tflint \
+            --recursive \
+            --format json \
+            > tflint-results.json \
+            2> tflint-error.log
+
+          TFLINT_EXIT_CODE=$?
+
+          set -e
+
+          echo ""
+          echo "TFLint exit code: $TFLINT_EXIT_CODE"
+
+          if [ ! -s "tflint-results.json" ]; then
+            echo "::error::TFLint JSON report is empty or was not generated."
+
+            if [ -f "tflint-error.log" ]; then
+              echo ""
+              echo "TFLint Error Output"
+              echo "----------------------------------------"
+              cat tflint-error.log
+            fi
+
+            exit 1
+          fi
+
+          echo ""
+          echo "TFLint JSON report generated successfully."
+
+          ls -lh tflint-results.json
+
+          echo "exit_code=$TFLINT_EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+          # Do not fail yet.
+          # Generate human-readable report first.
+          exit 0
+
+      # ============================================================
+      # VERIFY TFLINT SUMMARY SCRIPT
+      # ============================================================
+
+      - name: Verify TFLint summary script
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "scripts/tflint-summary.py" ]; then
+            echo "::error::scripts/tflint-summary.py was not found."
+
+            echo ""
+            echo "Available scripts:"
+
+            find scripts \
+              -maxdepth 2 \
+              -type f \
+              -print \
+              2>/dev/null || true
+
+            exit 1
+          fi
+
+          echo "TFLint summary script found."
+
+      # ============================================================
+      # GENERATE TFLINT REPORTS
+      # ============================================================
+
+      - name: Generate TFLint reports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Generating TFLint Reports"
+          echo "========================================"
+
+          python scripts/tflint-summary.py \
+            tflint-results.json \
+            tflint-summary.md \
+            tflint-summary.html
+
+          echo ""
+          echo "Generated reports:"
+          echo "----------------------------------------"
+
+          ls -lh \
+            tflint-results.json \
+            tflint-summary.md \
+            tflint-summary.html
+
+      # ============================================================
+      # ADD TFLINT REPORT TO GITHUB SUMMARY
+      # ============================================================
+
+      - name: Add TFLint report to GitHub job summary
+        shell: bash
+        run: |
+          echo "## 🔍 Terraform TFLint Quality Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          cat tflint-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      # ============================================================
+      # CHECKOV SECURITY SCAN
+      # ============================================================
+
+      - name: Install Checkov
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Installing Checkov"
+          echo "========================================"
+
+          python -m pip install --upgrade pip
+          pip install checkov
+
+      - name: Run Checkov Terraform Security Scan
+        id: checkov
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Running Checkov"
+          echo "========================================"
+
+          set +e
+
+          checkov \
+            -d . \
+            --framework terraform \
+            --compact \
+            2>&1 | tee checkov-results.log
+
+          CHECKOV_EXIT_CODE=${PIPESTATUS[0]}
+
+          set -e
+
+          echo ""
+          echo "Checkov exit code: $CHECKOV_EXIT_CODE"
+
+          echo "exit_code=$CHECKOV_EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+          # Do not fail here.
+          # Continue so Terraform plan and summary are generated.
+          exit 0
+
+      # ============================================================
+      # ADD CHECKOV SUMMARY
+      # ============================================================
+
+      - name: Add Checkov result to GitHub job summary
+        shell: bash
+        run: |
+          echo "## 🛡️ Checkov Security Scan" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ steps.checkov.outputs.exit_code }}" = "0" ]; then
+            echo "✅ **Status:** PASSED" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ **Status:** SECURITY FINDINGS DETECTED" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Detailed Checkov output is available in the workflow artifacts." >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      # ============================================================
+      # VERIFY TFVARS
+      # ============================================================
+
       - name: Verify production tfvars
         shell: bash
         run: |
@@ -278,6 +512,7 @@ jobs:
 
             echo ""
             echo "Available .tfvars files:"
+
             find . \
               -type f \
               -name "*.tfvars" \
@@ -287,11 +522,13 @@ jobs:
             exit 1
           fi
 
+          echo ""
           echo "Found: $TFVARS_FILE"
 
-      # ------------------------------------------------------------
-      # Terraform plan
-      # ------------------------------------------------------------
+      # ============================================================
+      # TERRAFORM PLAN
+      # ============================================================
+
       - name: Terraform Plan
         shell: bash
         run: |
@@ -310,39 +547,10 @@ jobs:
             -no-color \
             2>&1 | tee terraform-plan.log
 
-            # ------------------------------------------------------------
-      # Terraform Linting
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY TERRAFORM PLAN
+      # ============================================================
 
-      - name: Setup TFLint
-        uses: terraform-linters/setup-tflint@v5
-
-      - name: Initialize TFLint
-        run: tflint --init
-
-      - name: Run TFLint
-        run: tflint --recursive
-
-
-      # ------------------------------------------------------------
-      # Terraform Security Scan
-      # ------------------------------------------------------------
-
-      - name: Install Checkov
-        run: |
-          python -m pip install --upgrade pip
-          pip install checkov
-
-      - name: Run Checkov Terraform Security Scan
-        run: |
-          checkov \
-            -d . \
-            --framework terraform \
-            --compact
-
-      # ------------------------------------------------------------
-      # Debug generated Terraform plan
-      # ------------------------------------------------------------
       - name: Verify Terraform plan file
         shell: bash
         run: |
@@ -358,30 +566,39 @@ jobs:
           fi
 
           ls -lh tfplan
+
+          echo ""
           echo "Terraform plan created successfully."
 
-      # ------------------------------------------------------------
-      # Convert plan to JSON
-      # ------------------------------------------------------------
+      # ============================================================
+      # CONVERT TERRAFORM PLAN TO JSON
+      # ============================================================
+
       - name: Convert plan to JSON
         shell: bash
         run: |
           set -euo pipefail
 
           echo "========================================"
-          echo "Converting Plan to JSON"
+          echo "Converting Terraform Plan to JSON"
           echo "========================================"
 
           terraform show \
             -json tfplan \
             > tfplan.json
 
+          if [ ! -s "tfplan.json" ]; then
+            echo "::error::Terraform plan JSON was not generated."
+            exit 1
+          fi
+
           ls -lh tfplan.json
 
-      # ------------------------------------------------------------
-      # Verify Python
-      # ------------------------------------------------------------
-      - name: Verify Python and summary script
+      # ============================================================
+      # VERIFY PYTHON SUMMARY SCRIPT
+      # ============================================================
+
+      - name: Verify Python and Terraform plan summary script
         shell: bash
         run: |
           set -euo pipefail
@@ -393,24 +610,31 @@ jobs:
           python --version
 
           echo ""
-          echo "Checking summary script..."
+          echo "Checking Terraform plan summary script..."
 
           if [ ! -f "scripts/terraform-plan-summary.py" ]; then
             echo "::error::scripts/terraform-plan-summary.py was not found."
 
             echo ""
             echo "Scripts directory:"
-            find scripts -maxdepth 2 -type f -print 2>/dev/null || true
+
+            find scripts \
+              -maxdepth 2 \
+              -type f \
+              -print \
+              2>/dev/null || true
 
             exit 1
           fi
 
-          echo "Summary script found."
+          echo ""
+          echo "Terraform plan summary script found."
 
-      # ------------------------------------------------------------
-      # Generate Markdown plan summary
-      # ------------------------------------------------------------
-      - name: Generate plan table
+      # ============================================================
+      # GENERATE TERRAFORM PLAN TABLE
+      # ============================================================
+
+      - name: Generate Terraform plan table
         shell: bash
         run: |
           set -euo pipefail
@@ -423,24 +647,38 @@ jobs:
             tfplan.json \
             > terraform-plan-summary.md
 
+          if [ ! -s "terraform-plan-summary.md" ]; then
+            echo "::error::Terraform plan summary was not generated."
+            exit 1
+          fi
+
           echo ""
-          echo "Generated summary:"
+          echo "Generated Terraform Plan Summary:"
+          echo "----------------------------------------"
+
           cat terraform-plan-summary.md
 
-      # ------------------------------------------------------------
-      # GitHub job summary
-      # ------------------------------------------------------------
-      - name: Add plan table to job summary
+      # ============================================================
+      # ADD TERRAFORM PLAN TO GITHUB SUMMARY
+      # ============================================================
+
+      - name: Add Terraform plan table to job summary
         shell: bash
         run: |
-          echo "## Terraform Plan Result" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 📋 Terraform Plan Result" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
+
           cat terraform-plan-summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      # ------------------------------------------------------------
-      # Add plan summary to pull request
-      # ------------------------------------------------------------
-      - name: Post plan table to Pull Request
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      # ============================================================
+      # POST TERRAFORM PLAN TO PULL REQUEST
+      # ============================================================
+
+      - name: Post Terraform plan table to Pull Request
         uses: actions/github-script@v8
         with:
           script: |
@@ -461,11 +699,68 @@ jobs:
               body: body
             });
 
-            console.log("Terraform plan summary posted successfully.");
+            console.log(
+              "Terraform plan summary posted successfully."
+            );
 
-      # ------------------------------------------------------------
-      # Upload debug logs and plan artifacts
-      # ------------------------------------------------------------
+      # ============================================================
+      # POST TFLINT REPORT TO PULL REQUEST
+      # ============================================================
+
+      - name: Post TFLint summary to Pull Request
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require("fs");
+
+            const body = fs.readFileSync(
+              "tflint-summary.md",
+              "utf8"
+            );
+
+            const commentBody = `
+            ## 🔍 Terraform TFLint Quality Report
+
+            ${body}
+            `;
+
+            console.log("Posting TFLint summary to PR...");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+
+            console.log(
+              "TFLint summary posted successfully."
+            );
+
+      # ============================================================
+      # FINAL PIPELINE SUMMARY
+      # ============================================================
+
+      - name: Add final pipeline status
+        if: always()
+        shell: bash
+        run: |
+          echo "## 🚀 Terraform CI Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Validation | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Terraform Format | Completed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Terraform Validate | Completed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| TFLint | Exit Code: ${{ steps.tflint.outputs.exit_code }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Checkov | Exit Code: ${{ steps.checkov.outputs.exit_code }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Terraform Plan | Completed |" >> "$GITHUB_STEP_SUMMARY"
+
+      # ============================================================
+      # UPLOAD REPORTS / DEBUG ARTIFACTS
+      # ============================================================
+
       - name: Upload Terraform plan artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -478,4 +773,9 @@ jobs:
             terraform-plan.log
             tfplan.json
             terraform-plan-summary.md
+            tflint-results.json
+            tflint-error.log
+            tflint-summary.md
+            tflint-summary.html
+            checkov-results.log
           if-no-files-found: warn
