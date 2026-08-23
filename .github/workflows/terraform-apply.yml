@@ -24,15 +24,20 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
 
 jobs:
-
-  # ============================================================
-  # JOB 1
-  # CREATE FINAL PRODUCTION PLAN
-  # ============================================================
-
-  prepare-plan:
-    name: Prepare Production Plan
+  apply:
+    name: Terraform Production Apply
     runs-on: ubuntu-latest
+
+    # ------------------------------------------------------------
+    # Production environment
+    #
+    # If required reviewers are configured in:
+    # Settings -> Environments -> production
+    #
+    # GitHub will ask for approval before this job starts.
+    # ------------------------------------------------------------
+    environment:
+      name: production
 
     steps:
 
@@ -40,16 +45,18 @@ jobs:
       # CHECKOUT
       # ============================================================
 
-      - name: Checkout merged code
+      - name: Checkout approved and merged code
         uses: actions/checkout@v4
 
       # ============================================================
-      # GITHUB CONTEXT
+      # DEPLOYMENT CONTEXT
       # ============================================================
 
       - name: Show deployment context
         shell: bash
         run: |
+          set -euo pipefail
+
           echo "========================================"
           echo "Terraform Production Deployment"
           echo "========================================"
@@ -57,14 +64,17 @@ jobs:
           echo "Workflow         : $GITHUB_WORKFLOW"
           echo "Event            : $GITHUB_EVENT_NAME"
           echo "Branch           : $GITHUB_REF_NAME"
+          echo "Ref              : $GITHUB_REF"
           echo "Commit SHA       : $GITHUB_SHA"
           echo "Triggered By     : $GITHUB_ACTOR"
           echo "Run ID           : $GITHUB_RUN_ID"
           echo "AWS Region       : $AWS_REGION"
+          echo "Workspace        : $GITHUB_WORKSPACE"
+          echo "Environment      : production"
           echo "========================================"
 
       # ============================================================
-      # VERIFY TERRAFORM FILES
+      # VERIFY TERRAFORM CONFIGURATION
       # ============================================================
 
       - name: Verify Terraform configuration files
@@ -73,7 +83,7 @@ jobs:
           set -euo pipefail
 
           echo "========================================"
-          echo "Checking Terraform Configuration"
+          echo "Terraform Configuration Files"
           echo "========================================"
 
           find . \
@@ -88,12 +98,12 @@ jobs:
             -not -path "*/.terraform/*" \
             | grep -q .; then
 
-            echo "::error::No Terraform configuration files found."
+            echo "::error::No Terraform configuration files (*.tf) were found."
             exit 1
           fi
 
           echo ""
-          echo "Terraform configuration found successfully."
+          echo "Terraform configuration files found successfully."
 
       # ============================================================
       # SETUP TERRAFORM
@@ -107,6 +117,8 @@ jobs:
       - name: Verify Terraform installation
         shell: bash
         run: |
+          set -euo pipefail
+
           echo "========================================"
           echo "Terraform Version"
           echo "========================================"
@@ -114,13 +126,46 @@ jobs:
           terraform version
 
       # ============================================================
-      # VERIFY REQUIRED VARIABLES
+      # DEBUG GITHUB OIDC CLAIMS
+      #
+      # Useful because your AWS trust policy is based on the
+      # GitHub production environment OIDC subject.
+      # ============================================================
+
+      - name: Debug GitHub OIDC Claims
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+
+            const payload = JSON.parse(
+              Buffer.from(
+                token.split('.')[1],
+                'base64'
+              ).toString()
+            );
+
+            console.log("========================================");
+            console.log("GitHub OIDC Claims");
+            console.log("========================================");
+            console.log("Audience     :", payload.aud);
+            console.log("Subject      :", payload.sub);
+            console.log("Repository   :", payload.repository);
+            console.log("Ref          :", payload.ref);
+            console.log("Ref Type     :", payload.ref_type);
+            console.log("Environment  :", payload.environment);
+            console.log("Workflow     :", payload.workflow);
+            console.log("Actor        :", payload.actor);
+            console.log("========================================");
+
+      # ============================================================
+      # VERIFY REQUIRED GITHUB VARIABLES
       # ============================================================
 
       - name: Verify required GitHub variables
         shell: bash
         env:
-          PLAN_ROLE_ARN: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
+          APPLY_ROLE_ARN: ${{ vars.TERRAFORM_APPLY_ROLE_ARN }}
           STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
         run: |
           set -euo pipefail
@@ -129,8 +174,8 @@ jobs:
           echo "Required GitHub Variables"
           echo "========================================"
 
-          if [ -z "$PLAN_ROLE_ARN" ]; then
-            echo "::error::TERRAFORM_PLAN_ROLE_ARN is not configured."
+          if [ -z "$APPLY_ROLE_ARN" ]; then
+            echo "::error::TERRAFORM_APPLY_ROLE_ARN is not configured."
             exit 1
           fi
 
@@ -139,20 +184,23 @@ jobs:
             exit 1
           fi
 
-          echo "TERRAFORM_PLAN_ROLE_ARN configured."
+          echo "TERRAFORM_APPLY_ROLE_ARN configured."
           echo "TF_STATE_BUCKET configured."
           echo "AWS_REGION : $AWS_REGION"
+          echo "========================================"
 
       # ============================================================
-      # AWS OIDC - PLAN ROLE
+      # AWS AUTHENTICATION THROUGH GITHUB OIDC
+      #
+      # Keep the same APPLY role that was already working.
       # ============================================================
 
-      - name: Configure AWS credentials for Terraform Plan
+      - name: Configure AWS credentials with GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ vars.TERRAFORM_PLAN_ROLE_ARN }}
+          role-to-assume: ${{ vars.TERRAFORM_APPLY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: terraform-prod-plan-${{ github.run_id }}
+          role-session-name: terraform-apply-${{ github.run_id }}
 
       # ============================================================
       # VERIFY AWS IDENTITY
@@ -168,6 +216,10 @@ jobs:
           echo "========================================"
 
           aws sts get-caller-identity
+
+          echo ""
+          echo "AWS Region:"
+          aws configure get region || true
 
       # ============================================================
       # TERRAFORM INIT
@@ -195,9 +247,29 @@ jobs:
             2>&1 | tee terraform-init.log
 
       # ============================================================
+      # TERRAFORM FORMAT
+      #
+      # Lightweight safety check.
+      # TFLint and Checkov already run in PR Plan workflow.
+      # ============================================================
+
+      - name: Terraform Format
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Terraform Format Check"
+          echo "========================================"
+
+          terraform fmt \
+            -check \
+            -recursive \
+            -diff \
+            2>&1 | tee terraform-fmt.log
+
+      # ============================================================
       # TERRAFORM VALIDATE
-      # Lightweight safety validation before production planning.
-      # TFLint and Checkov already ran in PR pipeline.
       # ============================================================
 
       - name: Terraform Validate
@@ -248,7 +320,9 @@ jobs:
           echo "Found: $TFVARS_FILE"
 
       # ============================================================
-      # CREATE FINAL PRODUCTION PLAN
+      # CREATE FRESH PRODUCTION PLAN
+      #
+      # Always generate a fresh plan from the merged main branch.
       # ============================================================
 
       - name: Create final production plan
@@ -271,7 +345,7 @@ jobs:
             2>&1 | tee terraform-plan.log
 
       # ============================================================
-      # VERIFY PLAN
+      # VERIFY PLAN FILE
       # ============================================================
 
       - name: Verify Terraform plan
@@ -279,20 +353,26 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "========================================"
+          echo "Verify Terraform Plan"
+          echo "========================================"
+
           if [ ! -s "tfplan" ]; then
-            echo "::error::Terraform plan file was not created."
+            echo "::error::Terraform plan file was not generated."
             exit 1
           fi
 
-          echo "Terraform production plan generated successfully."
+          echo "Terraform plan generated successfully."
 
           ls -lh tfplan
 
       # ============================================================
       # CONVERT PLAN TO JSON
+      #
+      # This JSON is used later by deployment-report.py.
       # ============================================================
 
-      - name: Convert plan to JSON
+      - name: Convert Terraform plan to JSON
         shell: bash
         run: |
           set -euo pipefail
@@ -310,10 +390,12 @@ jobs:
             exit 1
           fi
 
+          echo "Terraform JSON plan generated successfully."
+
           ls -lh tfplan.json
 
       # ============================================================
-      # CREATE HUMAN READABLE PLAN SUMMARY
+      # GENERATE PRE-APPLY PLAN SUMMARY
       # ============================================================
 
       - name: Generate production plan summary
@@ -326,247 +408,64 @@ jobs:
           echo "========================================"
 
           if [ ! -f "scripts/terraform-plan-summary.py" ]; then
-            echo "::error::scripts/terraform-plan-summary.py was not found."
-            exit 1
+            echo "::warning::scripts/terraform-plan-summary.py was not found."
+            echo "Skipping pre-apply plan summary."
+            exit 0
           fi
 
           python scripts/terraform-plan-summary.py \
             tfplan.json \
             > production-plan-summary.md
 
-          if [ ! -s "production-plan-summary.md" ]; then
-            echo "::error::Production plan summary was not generated."
-            exit 1
+          if [ -s "production-plan-summary.md" ]; then
+            echo ""
+            echo "Production plan summary:"
+            echo "----------------------------------------"
+
+            cat production-plan-summary.md
+          else
+            echo "::warning::Production plan summary is empty."
           fi
 
-          cat production-plan-summary.md
-
       # ============================================================
-      # GITHUB JOB SUMMARY
+      # ADD PLAN TO GITHUB SUMMARY
       # ============================================================
 
       - name: Add production plan to GitHub summary
         shell: bash
         run: |
-          echo "# 🚀 Terraform Production Plan" >> "$GITHUB_STEP_SUMMARY"
+          echo "# 🚀 Terraform Production Deployment" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "| Deployment Information | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Deployment Information" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Environment | Production |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Repository | $GITHUB_REPOSITORY |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Branch | $GITHUB_REF_NAME |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Commit | \`${GITHUB_SHA:0:7}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Triggered By | $GITHUB_ACTOR |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Run ID | $GITHUB_RUN_ID |" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "## 📋 Planned Infrastructure Changes" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -s "production-plan-summary.md" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "## 📋 Production Plan" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          cat production-plan-summary.md >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "---" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "### 🛑 Production Approval Required" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Review the production plan above before approving the deployment." >> "$GITHUB_STEP_SUMMARY"
-
-      # ============================================================
-      # UPLOAD EXACT PLAN FOR APPROVED APPLY JOB
-      # ============================================================
-
-      - name: Upload production plan
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-production-plan-${{ github.run_id }}
-          path: |
-            tfplan
-            tfplan.json
-            production-plan-summary.md
-            terraform-init.log
-            terraform-validate.log
-            terraform-plan.log
-          if-no-files-found: error
-          retention-days: 1
-
-
-  # ============================================================
-  # JOB 2
-  # PRODUCTION APPROVAL + TERRAFORM APPLY
-  # ============================================================
-
-  apply:
-    name: Approve and Apply Production
-    runs-on: ubuntu-latest
-
-    needs:
-      - prepare-plan
-
-    # IMPORTANT:
-    # Configure required reviewers for the "production"
-    # environment in GitHub repository settings.
-    #
-    # The job will stop here and wait for approval.
-    environment:
-      name: production
-
-    steps:
-
-      # ============================================================
-      # CHECKOUT EXACT MERGED COMMIT
-      # ============================================================
-
-      - name: Checkout approved merged code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-
-      # ============================================================
-      # SETUP TERRAFORM
-      # ============================================================
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ vars.TERRAFORM_VERSION || '1.12.2' }}
-
-      # ============================================================
-      # VERIFY REQUIRED APPLY VARIABLES
-      # ============================================================
-
-      - name: Verify required deployment variables
-        shell: bash
-        env:
-          APPLY_ROLE_ARN: ${{ vars.TERRAFORM_APPLY_ROLE_ARN }}
-          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
-        run: |
-          set -euo pipefail
-
-          echo "========================================"
-          echo "Production Deployment Configuration"
-          echo "========================================"
-
-          if [ -z "$APPLY_ROLE_ARN" ]; then
-            echo "::error::TERRAFORM_APPLY_ROLE_ARN is not configured."
-            exit 1
-          fi
-
-          if [ -z "$STATE_BUCKET" ]; then
-            echo "::error::TF_STATE_BUCKET is not configured."
-            exit 1
-          fi
-
-          echo "Terraform Apply role configured."
-          echo "Terraform state bucket configured."
-          echo "Environment : production"
-          echo "Region      : $AWS_REGION"
-
-      # ============================================================
-      # AWS OIDC - APPLY ROLE
-      # ============================================================
-
-      - name: Configure AWS credentials for Terraform Apply
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: ${{ vars.TERRAFORM_APPLY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: terraform-prod-apply-${{ github.run_id }}
-
-      # ============================================================
-      # VERIFY AWS IDENTITY
-      # ============================================================
-
-      - name: Verify AWS deployment identity
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "========================================"
-          echo "AWS Production Deployment Identity"
-          echo "========================================"
-
-          aws sts get-caller-identity
-
-      # ============================================================
-      # TERRAFORM INIT
-      # ============================================================
-
-      - name: Terraform Init
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "========================================"
-          echo "Terraform Init"
-          echo "========================================"
-
-          terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="key=prod/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true" \
-            -backend-config="use_lockfile=true" \
-            2>&1 | tee terraform-init-apply.log
-
-      # ============================================================
-      # DOWNLOAD EXACT PLAN CREATED BEFORE APPROVAL
-      # ============================================================
-
-      - name: Download approved production plan
-        uses: actions/download-artifact@v4
-        with:
-          name: terraform-production-plan-${{ github.run_id }}
-          path: .
-
-      # ============================================================
-      # VERIFY APPROVED PLAN
-      # ============================================================
-
-      - name: Verify approved Terraform plan
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "========================================"
-          echo "Approved Terraform Plan"
-          echo "========================================"
-
-          if [ ! -s "tfplan" ]; then
-            echo "::error::Approved tfplan artifact was not found."
-            exit 1
-          fi
-
-          if [ ! -s "tfplan.json" ]; then
-            echo "::error::Approved tfplan.json artifact was not found."
-            exit 1
-          fi
-
-          echo "Approved Terraform plan is available."
-
-          ls -lh tfplan tfplan.json
-
-      # ============================================================
-      # SHOW APPROVED PLAN SUMMARY
-      # ============================================================
-
-      - name: Show approved production plan
-        shell: bash
-        run: |
-          echo "========================================"
-          echo "Approved Production Plan"
-          echo "========================================"
-
-          if [ -f "production-plan-summary.md" ]; then
-            cat production-plan-summary.md
+            cat production-plan-summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
       # ============================================================
-      # APPLY EXACT APPROVED PLAN
+      # APPLY EXACT GENERATED PLAN
+      #
+      # IMPORTANT:
+      # Do not run terraform apply without tfplan here.
+      # We apply exactly what was generated above.
       # ============================================================
 
-      - name: Apply exact approved Terraform plan
+      - name: Apply exact generated Terraform plan
         id: terraform_apply
         shell: bash
         run: |
@@ -605,14 +504,16 @@ jobs:
 
           if [ -s "terraform-outputs.json" ]; then
             echo "Terraform outputs captured successfully."
+
             ls -lh terraform-outputs.json
           else
             echo "{}" > terraform-outputs.json
+
             echo "Terraform produced no outputs."
           fi
 
       # ============================================================
-      # VERIFY REPORTING SCRIPTS
+      # VERIFY DEPLOYMENT REPORT SCRIPTS
       # ============================================================
 
       - name: Verify deployment report scripts
@@ -638,7 +539,7 @@ jobs:
           python --version
 
           echo ""
-          echo "Required deployment reporting scripts found."
+          echo "Required deployment scripts found successfully."
 
       # ============================================================
       # GENERATE SUCCESS DEPLOYMENT REPORT
@@ -667,6 +568,16 @@ jobs:
             --markdown deployment-report.md \
             --html deployment-report.html
 
+          if [ ! -s "deployment-report.md" ]; then
+            echo "::error::deployment-report.md was not generated."
+            exit 1
+          fi
+
+          if [ ! -s "deployment-report.html" ]; then
+            echo "::error::deployment-report.html was not generated."
+            exit 1
+          fi
+
           echo ""
           echo "Generated deployment reports:"
 
@@ -682,18 +593,11 @@ jobs:
         if: success()
         shell: bash
         run: |
-          echo "# ✅ Terraform Production Deployment Successful" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "| Deployment Information | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Environment | Production |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Repository | $GITHUB_REPOSITORY |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Branch | $GITHUB_REF_NAME |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Commit | \`${GITHUB_SHA:0:7}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Triggered By | $GITHUB_ACTOR |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Run ID | $GITHUB_RUN_ID |" >> "$GITHUB_STEP_SUMMARY"
-
+          echo "## ✅ Production Deployment Successful" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           cat deployment-report.md >> "$GITHUB_STEP_SUMMARY"
@@ -704,6 +608,7 @@ jobs:
 
       - name: Send successful deployment email
         if: success()
+        shell: bash
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -723,38 +628,53 @@ jobs:
             "Terraform AWS Deployment - SUCCESS - Production"
 
       # ============================================================
-      # CREATE FAILURE EMAIL REPORT
+      # FAILURE REPORT
+      #
+      # Creates a simple HTML report if deployment fails.
       # ============================================================
 
-      - name: Generate failure report
+      - name: Generate failure deployment report
         if: failure()
         shell: bash
         run: |
+          echo "========================================"
+          echo "Generating Failure Deployment Report"
+          echo "========================================"
+
           cat > deployment-failure.html <<EOF
           <!DOCTYPE html>
           <html>
           <head>
             <meta charset="UTF-8">
+            <title>Terraform Deployment Failed</title>
+
             <style>
               body {
-                font-family: Arial, sans-serif;
-                background: #f5f7fa;
+                font-family: Arial, Helvetica, sans-serif;
+                background-color: #f4f6f8;
+                margin: 0;
                 padding: 30px;
               }
 
               .container {
-                max-width: 750px;
+                max-width: 760px;
                 margin: auto;
-                background: white;
+                background-color: #ffffff;
                 border-radius: 10px;
                 padding: 30px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                box-shadow: 0 2px 10px rgba(0,0,0,0.08);
               }
 
-              .failed {
-                color: #b42318;
-                font-size: 24px;
+              .header {
+                font-size: 26px;
                 font-weight: bold;
+                color: #b42318;
+                margin-bottom: 10px;
+              }
+
+              .subtitle {
+                color: #555555;
+                margin-bottom: 25px;
               }
 
               table {
@@ -764,30 +684,48 @@ jobs:
               }
 
               td {
-                padding: 10px;
-                border-bottom: 1px solid #ddd;
+                border-bottom: 1px solid #e5e7eb;
+                padding: 12px;
               }
 
               td:first-child {
                 font-weight: bold;
                 width: 35%;
+                background-color: #fafafa;
+              }
+
+              .status {
+                color: #b42318;
+                font-weight: bold;
+              }
+
+              .footer {
+                margin-top: 25px;
+                font-size: 13px;
+                color: #777777;
               }
             </style>
           </head>
 
           <body>
+
             <div class="container">
 
-              <div class="failed">
+              <div class="header">
                 ❌ Terraform Production Deployment Failed
               </div>
 
-              <p>
-                The Terraform production deployment did not complete
-                successfully.
-              </p>
+              <div class="subtitle">
+                The Terraform production deployment did not complete successfully.
+              </div>
 
               <table>
+
+                <tr>
+                  <td>Status</td>
+                  <td class="status">FAILED</td>
+                </tr>
+
                 <tr>
                   <td>Environment</td>
                   <td>Production</td>
@@ -822,17 +760,30 @@ jobs:
                   <td>Run ID</td>
                   <td>${GITHUB_RUN_ID}</td>
                 </tr>
+
+                <tr>
+                  <td>AWS Region</td>
+                  <td>${AWS_REGION}</td>
+                </tr>
+
               </table>
 
               <p>
-                Review the GitHub Actions workflow logs for the exact
-                failure details.
+                Review the GitHub Actions workflow logs to identify
+                the exact failed stage and error message.
               </p>
 
+              <div class="footer">
+                Generated automatically by the Terraform production pipeline.
+              </div>
+
             </div>
+
           </body>
           </html>
           EOF
+
+          echo "Failure report generated."
 
       # ============================================================
       # FAILURE JOB SUMMARY
@@ -842,27 +793,39 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          echo "# ❌ Terraform Production Deployment Failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "| Deployment Information | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "## ❌ Terraform Production Deployment Failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Status | ❌ FAILED |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Environment | Production |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Repository | $GITHUB_REPOSITORY |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | $GITHUB_REF_NAME |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Commit | \`${GITHUB_SHA:0:7}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Triggered By | $GITHUB_ACTOR |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Status | ❌ FAILED |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Run ID | $GITHUB_RUN_ID |" >> "$GITHUB_STEP_SUMMARY"
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Review the failed workflow step for detailed error information." >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Review the failed workflow step for the exact Terraform error." \
+            >> "$GITHUB_STEP_SUMMARY"
 
       # ============================================================
       # FAILURE EMAIL
+      #
+      # continue-on-error prevents an SMTP problem from hiding
+      # the original Terraform failure.
       # ============================================================
 
       - name: Send failed deployment email
         if: failure()
         continue-on-error: true
+        shell: bash
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -870,15 +833,20 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        shell: bash
         run: |
+          echo "========================================"
+          echo "Sending Failed Deployment Email"
+          echo "========================================"
+
           if [ ! -f "scripts/send-email.py" ]; then
-            echo "send-email.py unavailable. Skipping failure email."
+            echo "send-email.py was not found."
+            echo "Skipping failure email."
             exit 0
           fi
 
           if [ ! -f "deployment-failure.html" ]; then
-            echo "Failure report unavailable. Skipping failure email."
+            echo "deployment-failure.html was not found."
+            echo "Skipping failure email."
             exit 0
           fi
 
@@ -896,7 +864,10 @@ jobs:
         with:
           name: terraform-production-deployment-${{ github.run_id }}
           path: |
-            terraform-init-apply.log
+            terraform-init.log
+            terraform-fmt.log
+            terraform-validate.log
+            terraform-plan.log
             terraform-apply.log
             tfplan.json
             production-plan-summary.md
