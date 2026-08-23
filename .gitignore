@@ -1,10 +1,23 @@
+# TFLint generated reports
+tflint-results.json
+tflint-summary.md
+tflint-summary.html
+tflint-error.log
+
+# Checkov generated reports
+checkov-results.log
+
+# Terraform generated plan files
+tfplan
+tfplan.json
+
+# Terraform logs
+terraform-init.log
+terraform-fmt.log
+terraform-validate.log
+terraform-plan.log
+
+# Terraform local files
 .terraform/
 *.tfstate
 *.tfstate.*
-tfplan
-tfplan.json
-terraform-*.log
-terraform-plan-summary.md
-terraform-outputs.json
-deployment-report.md
-deployment-report.html
